@@ -1,6 +1,6 @@
 # ChatGPT/LLM Toolkit Backend
 
-This repo contains the code that allows you to Host your own backend for the ChatGPT/LLM Toolikit Bubble plugin ().
+This repo contains the code that allows you to host your own backend for the ChatGPT/LLM Toolikit Bubble plugin.
 
 To setup your own server, you'll need to setup a webserver (e.g., Nginx or Apache) that can accept HTTPS traffic and route it to two docker containers.
 
