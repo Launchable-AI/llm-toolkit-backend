@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  streaming-service:
+    image: streaming-service:600
+    build:
+      context: ./streaming_service
+      dockerfile: Dockerfile
+    env_file:
+      - .dev.env
+    ports:
+      - "8000:8000"
+
+  data-service:
+    image: data-service:600
+    build:
+      context: ./data_service
+      dockerfile: Dockerfile
+    env_file:
+      - .dev.env
+    ports:
+      - "8001:8000"
+
+  unstructured-api:
+    image: downloads.unstructured.io/unstructured-io/unstructured-api:latest
+    container_name: llm-toolkit-backend-unstructured-api
+    ports:
+      - "8080:8000"
+    environment:
+      - UNSTRUCTURED_MEMORY_FREE_MINIMUM_MB=1024
+    volumes:
+      - ./data:/data
+
+  redis:
+    image: redis:latest
+    command: redis-server --requirepass redistest123
+    env_file:
+      - .dev.env
