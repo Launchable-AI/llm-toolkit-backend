@@ -20,15 +20,21 @@ git clone https://github.com/Launchable-AI/llm-toolkit-backend
 
 3. Make sure Docker and Docker Compose are installed.  See: https://docs.docker.com/engine/install/
 
-4. Build and run Docker containers:
+4. Change directories into the repo folder you just downloaded
+
+```bash
+cd llm-toolkit-backend
+```
+
+5. Build and run Docker containers:
 
 ```bash
 sudo docker compose up --build
 ```
 
-5. Set up your Data Container (the plugin element within Bubble) to point to your server.
+6. Set up your Data Container (the plugin element within Bubble) to point to your server.
 
-6. Test!
+7. Test!  Open your Bubble app and test your setup.
 
 ## Learn More
 
