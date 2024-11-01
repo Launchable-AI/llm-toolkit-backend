@@ -22,6 +22,9 @@ from fastapi.responses import JSONResponse
 import openai  # for embeddings
 #from unstructured.partition.auto import partition  # for document text
 #from unstructured.chunking.title import chunk_by_title # for text chunking
+from unstructured_client import UnstructuredClient
+from unstructured_client.models import shared
+
 from bs4 import BeautifulSoup  # for web scraping
 
 
@@ -45,11 +48,11 @@ async def manually_chunk_by_title(elements, min_chunk_size=256, max_chunk_size=2
     chunks = []
     
     for e in elements:
-        logger.debug("Element:")
-        logger.debug(e)
+        # logger.debug("Element:")
+        # logger.debug(e)
         # Helper function to get the initial chunk structure
         def create_chunk(element):
-            metadata = element.get('metadata')
+            metadata = element.get('metadata', None)
             page_num = metadata.get('page_number', None)
 
             return {
@@ -71,7 +74,7 @@ async def manually_chunk_by_title(elements, min_chunk_size=256, max_chunk_size=2
     return chunks
 
 
-async def partition_with_unstructured_api(filepath: Path):
+async def partition_with_unstructured_api(filepath: Path, strategy: str = "fast"):
     ''' Extract text from files using th unstructured API
 
 
@@ -80,10 +83,11 @@ async def partition_with_unstructured_api(filepath: Path):
     '''
 
     try:
-        # URL points to local docker container running API
-        url = 'http://unstructured-api:8000/general/v0/general'  
+        #url = 'https://launchableai-hamg5ukz.api.unstructuredapp.io/general/v0/general'  # paid url
+        url = 'https://api.unstructuredapp.io/general/v0/general'  # free url
+        #url = 'https://unstructured.io/api-key-free'   # website url?
 
-        unstructured_api_key = os.getenv('UNSTRUCTURED_API_KEY', None)
+        unstructured_api_key = 'ZguRIUH77WOTwbXqYcOv7OzJToaXmP' # paid key
 
         headers = {
             'accept': 'application/json',
@@ -91,7 +95,7 @@ async def partition_with_unstructured_api(filepath: Path):
         }
 
         data = {
-            "strategy": "auto",
+            "strategy": strategy,
             "include_pagebreaks": "true",
         }
 
@@ -102,10 +106,12 @@ async def partition_with_unstructured_api(filepath: Path):
         logger.debug(f"Response from unstructured API: {response}")
 
         json_response = response.json()
+        logger.debug(f"Response from unstructured API: {json_response}")
 
         chunks = await manually_chunk_by_title(json_response)
 
         logger.debug(f"Extracted {len(chunks)} chunks from file buffer")
+        #logger.debug(chunks)
 
         file_data['files'].close()
 
@@ -117,7 +123,7 @@ async def partition_with_unstructured_api(filepath: Path):
         raise e
 
 
-async def partition(filepath: Path):
+async def partition(filepath: Path, strategy: str = "fast"):
     ''' Extract text from a file
 
     Args:
@@ -128,8 +134,7 @@ async def partition(filepath: Path):
             text: Text of chunk
             page: Page number of chunk
     '''
-    # chunks = await partition_with_unstructured_api(file_buffer=file_buffer)
-    chunks = await partition_with_unstructured_api(filepath=filepath)
+    chunks = await partition_with_unstructured_api(filepath=filepath, strategy=strategy)
     return chunks
 
 async def compose_constraints_str(key, type, value) -> str:
@@ -138,7 +143,7 @@ async def compose_constraints_str(key, type, value) -> str:
     Args:
         key (str): Key to filter by
         type (str): Type of constraint (in, not in, etc.)
-        value (str): Value to filter by
+        value (any): Value to filter by
 
     Returns:
         constraints_str (str): Stringified JSON of constraints
@@ -193,6 +198,7 @@ async def fetch_all_data_by_constraints(
         if not isinstance(sublist, Exception):
             results.extend(sublist[0])  # sublist[0] is the data from the tuple returned by fetch_data_by_constraints_from_bubble
 
+    logger.debug(f"Returning {len(results)} records from fetch_all_data_by_constraints")
     return results
 
 #async def fetch_data_by_constraints_from_bubble(request: VectorSimilarity, constraints_str: str = None) -> List[dict]:
@@ -241,18 +247,17 @@ async def fetch_data_by_constraints_from_bubble(
                 
                 # Parse the response JSON
                 data = await response.json()
-                logger.debug("Bubble reponse - remaining:")
-                logger.debug(data["response"]["remaining"])
                 return data["response"]["results"], data["response"]["remaining"]
 
     except Exception as e:
         logger.error(f"Failed to fetch chunk with URL {url_with_params}. Error: {str(e)}")
         return [f"Error: {str(e)}"]
 
-def chunkify(lst, n):
+def chunkify(list_of_ids, n):
     """Yield successive n-sized chunks from lst."""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+    logger.debug("Chunkifying list of IDs")
+    for i in range(0, len(list_of_ids), n):
+        yield list_of_ids[i:i + n]
 
 async def fetch_chunks_by_id_from_bubble(request: VectorSimilarity):
     ''' This is used specifically to break up the unique IDs into chunks of 25 
@@ -277,7 +282,7 @@ async def fetch_chunks_by_id_from_bubble(request: VectorSimilarity):
     # Create the list of tasks for asyncio.gather
     tasks = []
     for id_chunk in id_chunks:
-        constraints_str = await compose_constraints_str(request.constraint_key, request.constraint_type, ','.join(id_chunk))
+        constraints_str = await compose_constraints_str(request.constraint_key, request.constraint_type, id_chunk)
         tasks.append(fetch_data_by_constraints_from_bubble(request, constraints_str=constraints_str))
 
     # Gather the results
@@ -306,11 +311,17 @@ async def fetch_data_from_bubble(request: VectorSimilarity):
     '''
     
     if request.constraint_key == "_id" or request.chunk_unique_ids:
-        final_results = await fetch_chunks_by_id_from_bubble(request)
+        logger.debug("Fetching by unique IDs")
+        # Resp object contains records in a list, and a final item which is 
+        # count remaining.  We return the first item, which is the list of recs
+        resp = await fetch_chunks_by_id_from_bubble(request)
+        final_results = resp[0]
     else:
+        logger.debug("Fetching by constraints")
         constraints_str = await compose_constraints_str(request.constraint_key, request.constraint_type, request.constraint_value)
+        # Here we get a list of records back (and not a trailing int of 
+        # remaining records), so we return as is
         final_results = await fetch_all_data_by_constraints(request, constraints_str)
-        #final_results = await fetch_all_data_by_constraints(request, constraints_str, total_limit=200)
 
     logger.debug(f"Fetched {len(final_results)} items from bubble")
     return final_results
@@ -367,27 +378,87 @@ async def send_to_bubble_data_api(request: FileParsingRequest, result_data: dict
         logger.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error sending data to {data_api_url}")
 
+async def partition_with_unstructured_api_new(filepath: str, filename: str):    
+
+    api_key_unstructured = os.getenv("UNSTRUCTURED_API_KEY", None)
+    if not api_key_unstructured:
+        raise HTTPException(status_code=500, detail="Unstructured API key not set")
+
+    client = UnstructuredClient(
+        api_key_auth=api_key_unstructured,
+        server_url="https://api.unstructuredapp.io",
+    )
+
+    file_to_parse = open(filepath, "rb")
+
+    req = {
+        "partition_parameters": {
+            "files": {
+                "content": file_to_parse,
+                "file_name": filename,
+            },
+            "strategy": shared.Strategy.FAST,
+        }
+    }
+
+    response = await client.general.partition_async(request=req)
+    logger.debug(f"Response from unstructured API: {response}")
+
+    chunks = await manually_chunk_by_title(response.elements)
+    logger.debug(chunks)
+
+    file_to_parse.close()
+
+    return chunks
+
+    # logger.debug(f"Response from unstructured API: {res}")
+    # logger.debug(f"Elements: {res.elements}")
+    # element_dicts = [element for element in res.elements]
+    # logger.debug(f"Extracted {len(element_dicts)} elements from file")
+    # logger.debug(element_dicts)
+    # return element_dicts
 
 
 async def file_parsing_wrapper(request: FileParsingRequest):
     try:
         logger.debug(f"Received request: {request}")
 
-        # Download the file from file_url
-        response = requests.get(request.file_url)
+        # Ensure file_url has a proper scheme
+        file_url = request.file_url if request.file_url.startswith("http") else f"https:{request.file_url}"
+        logger.debug("File URL: " + file_url)
 
+        # Download the file from file_url
+        response = requests.get(file_url) 
+        logger.debug(f"Response status code from file_url: {response.status_code}")
+
+        # Log content length
+        content_length = len(response.content)
+        logger.debug(f"Content length of downloaded file: {content_length} bytes")
+        
         # If response successful, parse the file
         if response.status_code == 200:
+            logger.debug(f"Downloaded file from {request.file_url}")
             # Create /tmp filepath 
             ext = os.path.splitext(request.file_url)[1]
+            logger.debug("File extension: " + ext)
             id = uuid.uuid4()
+            logger.debug("ID: " + str(id))
+            filename = f"{id}{ext}"
+            logger.debug("Filename: " + filename)
             filepath = f"/tmp/{id}{ext}"
+            logger.debug("Filepath: " + filepath)
+
+            logger.debug ("Content: ")
+            logger.debug(response.content)
+
             with open(filepath, "wb") as f:
                 # Save the file to the /tmp path
                 f.write(response.content)
-                # Extract the chunks from the file
-                # Chunks have text: and page_number: keys
-                chunks = await partition(filepath)
+                # Ensure the data is written to disk
+                f.flush()  # Forces the file to be written immediately
+                os.fsync(f.fileno())  # Ensures that the OS flushes its buffers
+                logger.debug(os.path.getsize(filepath))
+                chunks = await partition_with_unstructured_api_new(filepath=filepath, filename=filename)
         else:
             logger.error(f"Failed to download file from {request.file_url}")
             raise HTTPException(status_code=500, detail=f"Failed to download file from {request.file_url}")
@@ -395,10 +466,8 @@ async def file_parsing_wrapper(request: FileParsingRequest):
         # If the user wants to create embeddings, do that now
         embeddings = []
         if request.create_embeddings:
-            #embeddings = await create_embeddings_for_texts([chunk['text'] for chunk in chunks], request.openai_api_key)
-            embeddings = await create_embeddings_for_texts([chunk['text'] for chunk in chunks], request.openai_api_key)
+            embeddings = await create_embeddings_for_texts([chunk['text'] for chunk in chunks], request.openai_api_key, request.embedding_model)
             logger.debug(f"Created {len(embeddings)} embeddings for {len(chunks)} chunks")
-            #logger.debug(embeddings)
 
         result_data = {
             "texts": [chunk['text'] for chunk in chunks],
@@ -412,9 +481,9 @@ async def file_parsing_wrapper(request: FileParsingRequest):
         if request.data_api_url:
             send_results = await send_to_bubble_data_api(request, result_data, request.data_api_url)
             return send_results
-        elif request.wf_api_url:
-            send_results = await send_to_bubble_wf_api(request, result_data, request.wf_api_url)
-            return send_results
+        # elif request.wf_api_url:
+        #     send_results = await send_to_bubble_wf_api(request, result_data, request.wf_api_url)
+        #     return send_results
         # Otherwise, return the data
         else: 
             return result_data
@@ -476,12 +545,17 @@ async def call_serper_api(web_search_request: WebSearchRequest):
 def parse_embedding(embedding_str: str) -> List[float]:
     return list(map(float, embedding_str.split(',')))
 
-async def create_embeddings_for_texts(chunks: List[str], openai_api_key: str) -> List[List[float]]:
+async def create_embeddings_for_texts(
+        chunks: List[str], 
+        openai_api_key: str, 
+        embedding_model: str | None = "text-embedding-3-large") -> List[List[float]]:
     ''' 
     Create embeddings for a list of texts.
 
     Args:
         chunks (list[str]): List of text chunks to create embeddings for
+        openai_api_key (str): OpenAI API key
+        embedding_model (str): OpenAI embedding model to use
 
     Returns:
         embeddings (list[list[float]]): List of embeddings for each chunk
@@ -497,7 +571,7 @@ async def create_embeddings_for_texts(chunks: List[str], openai_api_key: str) ->
         response = await openai.Embedding.acreate(
             api_key=openai_api_key,
             input=block,  # Send a block of texts 
-            model="text-embedding-ada-002"
+            model=embedding_model
         )
 
         # Sort the embedding objects by the index

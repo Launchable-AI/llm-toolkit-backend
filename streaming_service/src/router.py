@@ -3,12 +3,17 @@ logger = logging.getLogger(__name__)
 
 import os
 import json
+import asyncio
+import base64
 import jwt
+import httpx
+import websockets
 from typing import Optional
 
 from .models import ChatCompletion, IssueTokenRequest, ExpireTokenRequest, \
     TokenCountRequest, FunctionCall, TruncationRequest, PostTestingDebugging, \
-    TruncationStandaloneRequest, CreateThreadAndRunRequest, CreateRunRequest
+    TruncationStandaloneRequest, CreateThreadAndRunRequest, CreateRunRequest, \
+    TextToSpeechRequest
 from .security import generate_token, decrypt_jwt, verify_token
 from .helpers import prepare_openai_request, event_generator,\
     handle_exception, call_api, num_tokens_from_messages, auto_truncate_messages
@@ -17,11 +22,11 @@ from .config import settings, front_end_limiter, back_end_limiter
 
 from openai import OpenAI, AsyncOpenAI
 
-from fastapi import HTTPException, UploadFile, File, Form
+from fastapi import HTTPException, UploadFile, File, Form, \
+    Request, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import requests 
-from fastapi import Request, APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
 
@@ -494,39 +499,37 @@ async def create_thread_and_run(
     ):
     logger.info(f"Request to /create_thread_and_run")
     logger.debug(create_thread_and_run_request)
-
-    if create_thread_and_run_request.security_token:
-        logging.debug("Token detected")
-        # Verify the token
-        try:
-            decrypted_jwt = await decrypt_jwt(create_thread_and_run_request.security_token[10:])
-            decoded_token = await verify_token(decrypted_jwt, create_thread_and_run_request.app_url)
-            logger.debug(decoded_token)
+    
+    try:
+        if create_thread_and_run_request.user_openai_api_key:
+            openai_api_key = create_thread_and_run_request.user_openai_api_key
+        elif create_thread_and_run_request.security_token:
+            # Verify the token
+            logging.debug("Token detected")
+            decoded_token = await decrypt_jwt(create_thread_and_run_request.security_token)
+            valid_token = await verify_token(decoded_token, create_thread_and_run_request.app_url)  
+            if valid_token is False:
+                raise HTTPException(status_code=401, detail="Invalid token")
             openai_api_key = decoded_token.get("api_key", None)
-        except Exception as e:
-            logger.debug("Error verifying token")
-            logger.debug(e)
-            raise HTTPException(status_code=401, detail="Invalid token")
-    else:
-        if not create_thread_and_run_request.user_openai_api_key:
-            raise HTTPException(status_code=401, detail="No API key provided")
-        # for case when User-provided API key is present
-        openai_api_key = create_thread_and_run_request.user_openai_api_key
 
-    client = AsyncOpenAI(api_key=openai_api_key)
+        client = AsyncOpenAI(api_key=openai_api_key)
 
-    stream = await client.beta.threads.create_and_run(
-        thread=create_thread_and_run_request.thread,
-        assistant_id=create_thread_and_run_request.assistant_id,
-        tools=create_thread_and_run_request.tools,
-        instructions=create_thread_and_run_request.instructions,
-        model=create_thread_and_run_request.model,
-        metadata=create_thread_and_run_request.run_metadata,
-        stream=True
-    )
+        stream = await client.beta.threads.create_and_run(
+            thread=create_thread_and_run_request.thread,
+            assistant_id=create_thread_and_run_request.assistant_id,
+            tools=create_thread_and_run_request.tools,
+            instructions=create_thread_and_run_request.instructions,
+            model=create_thread_and_run_request.model,
+            metadata=create_thread_and_run_request.run_metadata,
+            stream=True
+        )
 
-    # Pass the asynchronous generator to StreamingResponse
-    return StreamingResponse(event_stream_generator(stream), media_type="text/event-stream")
+        # Pass the asynchronous generator to StreamingResponse
+        return StreamingResponse(event_stream_generator(stream), media_type="text/event-stream")
+    except Exception as e:
+        logger.error("Error creating thread and run:")
+        logger.error(e, exc_info=True)
+        return await handle_exception(e)
 
 @router.post("/streaming/threads/{thread_id}/runs")
 @router.post("/threads/{thread_id}/runs")
@@ -540,23 +543,16 @@ async def create_run(
         logger.info(f"Request to /create_run")
         logger.debug(create_run_request)
 
-        if create_run_request.security_token:
-            logging.debug("Token detected")
-            # Verify the token
-            try:
-                decrypted_jwt = await decrypt_jwt(create_run_request.security_token[10:])
-                decoded_token = await verify_token(decrypted_jwt, create_run_request.app_url)
-                logger.debug(decoded_token)
-                openai_api_key = decoded_token.get("api_key", None)
-            except Exception as e:
-                logger.debug("Error verifying token")
-                logger.debug(e)
-                raise HTTPException(status_code=401, detail="Invalid token")
-        else:
-            if not create_run_request.user_openai_api_key:
-                raise HTTPException(status_code=401, detail="No API key provided")
-            # for case when User-provided API key is present
+        if create_run_request.user_openai_api_key:
             openai_api_key = create_run_request.user_openai_api_key
+        elif create_run_request.security_token:
+            # Verify the token
+            logging.debug("Token detected")
+            decoded_token = await decrypt_jwt(create_run_request.security_token)
+            valid_token = await verify_token(decoded_token, create_run_request.app_url)  
+            if valid_token is False:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            openai_api_key = decoded_token.get("api_key", None)
 
         client = AsyncOpenAI(api_key=openai_api_key)
 
@@ -576,3 +572,95 @@ async def create_run(
         logger.error("Error creating run:")
         logger.error(e, exc_info=True)
         return await handle_exception(e)
+
+# @router.post("/streaming/text_to_speech")
+# @router.post("/text_to_speech")
+# async def text_to_speech(request: TextToSpeechRequest):
+#     try:
+
+#         logging.debug("Token detected")
+
+#         # Verify token
+#         decoded_token = await decrypt_jwt(request.security_token)
+#         valid_token = await verify_token(decoded_token, request.app_url)  
+#         if valid_token is False:
+#             raise HTTPException(status_code=401, detail="Invalid token")
+
+#         # Extract the OpenAI API key from the token
+#         openai_api_key = decoded_token.get("api_key", None)
+
+#         if not request.input:
+#             raise HTTPException(status_code=400, detail="Missing required parameters")
+
+#         # Prepare the request to OpenAI's API
+#         url = "https://api.openai.com/v1/audio/speech"
+#         headers = {
+#             "Authorization": f"Bearer {openai_api_key}",
+#             "Content-Type": "application/json"
+#         }
+#         data = {
+#             "model": request.model,
+#             "input": request.input,
+#             "voice": request.voice
+#         }
+
+#         async with httpx.AsyncClient() as client:
+#             response = await client.post(url, json=data, headers=headers)
+            
+#             if response.status_code != 200:
+#                 raise HTTPException(status_code=response.status_code, detail=response.text)
+
+#             # Stream the response back to the client
+#             return StreamingResponse(response.iter_bytes(), media_type="audio/mpeg")
+
+#     except Exception as e:
+#         logger.error("Error in text_to_speech endpoint:", exc_info=True)
+#         return await handle_exception(e)
+    
+# WebSocket endpoint for real-time streaming
+@router.websocket("/realtime-stream")
+@router.websocket("/streaming/realtime-stream")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    openai_url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+    
+    openai_api_key = "TBD"
+
+    # Connect to OpenAI Realtime API WebSocket using websockets library
+    async with websockets.connect(openai_url, extra_headers={
+        "Authorization": f"Bearer {openai_api_key}",
+        "OpenAI-Beta": "realtime=v1"
+    }) as openai_ws:
+        try:
+            while True:
+                # Receive message from the client
+                data = await websocket.receive_text()
+                message = json.loads(data)
+
+                if message["type"] == "audio_stream":
+                    # Send audio data to OpenAI's Realtime API
+                    audio_data = base64.b64decode(message["audio_data"])
+                    await openai_ws.send(audio_data)
+
+                # Get response from OpenAI (either text or audio)
+                response = await openai_ws.recv()
+                response_data = json.loads(response)
+
+                # Check if the response contains audio or text
+                if "audio" in response_data:
+                    await websocket.send_json({
+                        "type": "audio_response",
+                        "audio_data": base64.b64encode(response_data["audio"]).decode()
+                    })
+                elif "text" in response_data:
+                    await websocket.send_json({
+                        "type": "text_response",
+                        "text_data": response_data["text"]
+                    })
+
+        except WebSocketDisconnect:
+            print("Client disconnected")
+        except Exception as e:
+            print(f"Error: {e}")
+        finally:
+            await websocket.close()# WebSocket endpoint for real-time streaming

@@ -59,7 +59,9 @@ class IssueTokenRequest(BaseModel):
     password: str | None = None
     app_url: str | None = None
     headers: str | None = None
-    #caller_id: str  # is context.currentUser._id and _createdDate
+    user_id: str | None = None
+    request_limit: str | None = None
+    llm_toolkit_key: str | None = None
 
 class ExpireTokenRequest(BaseModel):
     token: str
@@ -105,3 +107,10 @@ class CreateRunRequest(BaseModel):
     security_token: str | None = None
     app_url: str | None = None
     stream: bool | None = True
+
+class TextToSpeechRequest(BaseModel):
+    model: str = "tts-1" # or "tts-1-hd"
+    input: str
+    voice: str = "alloy"
+    security_token: str | None = None
+    app_url: str | None = None

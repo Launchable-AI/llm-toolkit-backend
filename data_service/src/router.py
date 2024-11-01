@@ -1,6 +1,8 @@
 from .logger_config import get_logger
 logger = get_logger(__name__)
 
+import boto3 
+
 import logging
 import asyncio
 import aiohttp
@@ -8,9 +10,11 @@ import json
 
 from .helpers import file_parsing_wrapper, create_embeddings_for_texts, \
     parse_embedding, call_serper_api, fetch_page, fetch_data_from_bubble
-from .models import VectorSimilarity, WebSearchRequest, SiteReadRequest, FileParsingRequest
+from .models import VectorSimilarity, WebSearchRequest, SiteReadRequest, \
+    FileParsingRequest, VideoProcessingRequest
 
-from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, \
+    HTTPException
 from fastapi.responses import JSONResponse
 from sklearn.metrics.pairwise import cosine_similarity
 import heapq
@@ -136,7 +140,6 @@ async def fetch_page_contents(
             })
 
 
-
 @router.post("/data/extract_text_and_embeddings_from_file")
 @router.post("/extract_text_and_embeddings_from_file")
 async def extract_text_and_embeddings_from_file(
@@ -159,6 +162,7 @@ async def extract_text_and_embeddings_from_file(
             file_parsing_request.chunk_data_type (str): Data type of the chunks
             file_parsing_request.chunk_text_field (str): Field name for the text chunks
             file_parsing_request.chunk_embeddings_field (str): Field name for the embeddings
+            file_parsing_request.embedding_model (str): Name of the embedding model from OpenAI to use
 
     Returns:
         result_data: JSON object containing the results
@@ -185,9 +189,9 @@ async def extract_text_and_embeddings_from_file(
         else:
             # Run the processing synchronously
             result_data = await file_parsing_wrapper(file_parsing_request)
+
             return JSONResponse(
                 status_code=200,
-                # Note - 
                 content= {
                     "chunks": result_data["texts"],
                     "embeddings": result_data["embeddings"],
@@ -195,7 +199,7 @@ async def extract_text_and_embeddings_from_file(
                     "status_code": 200
             })
     except Exception as e:
-        logger.error("Error generating embeddings")
+        logger.error("Error handling file extraction or embeddings")
         logger.error(e, exc_info=True)
         return JSONResponse(
             status_code=500,
@@ -218,17 +222,37 @@ async def vector_similarity_endpoint(request: VectorSimilarity):
         logger.info(request)
 
         # Vectorize the incoming text
-        embedded_query = await create_embeddings_for_texts(chunks=[request.input_text], openai_api_key=request.openai_api_key)
+        embedded_query = await create_embeddings_for_texts(
+            chunks=[request.input_text], 
+            openai_api_key=request.openai_api_key, 
+            embedding_model=request.embedding_model)
         embedded_query_to_vector = parse_embedding(embedded_query[0])
 
         # Fetch chunks from bubble
+        # Records result is a list, first of which is a list, second is 
+        # int, count of remaining records
         records =  await fetch_data_from_bubble(request)
 
         # Extract embeddings list
-        embeddings = [record[request.chunk_embeddings_field] for record in records]
+        # First, only those with a chunk_embeddings_field
+        embedding_filtered_records = [record for record in records 
+                            if request.chunk_embeddings_field in record and 
+                                request.chunk_text_field in record]
+        # Second, take all records' embeddings
+        embeddings = [record[request.chunk_embeddings_field] for record in embedding_filtered_records]
 
         # Convert each embedding, stored as a string, to a list of floats
         parsed_embeddings = [parse_embedding(embed_str) for embed_str in embeddings]
+
+        # When no embeddings are found, return an empty list
+        if len(parsed_embeddings) == 0:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "matching_texts": [],
+                    "message": "No embeddings found",
+                    "status_code": 200,
+            })
 
         # Calculate cosine similarity
         similarity_scores = cosine_similarity([embedded_query_to_vector], parsed_embeddings)[0]
@@ -236,16 +260,33 @@ async def vector_similarity_endpoint(request: VectorSimilarity):
         # Sort the results
         sorted_records = sorted(zip(records, similarity_scores), key=lambda x: x[1], reverse=True)
 
-        # Return the top 'n' results
-        matching_texts = [record[request.chunk_text_field] for record,score in sorted_records][:request.return_count]
+        # Filter records that have request.chunk_text_field
+        text_filtered_records = [record for record, score in sorted_records if request.chunk_text_field in record]
+
+        # Extract chunk_text_field from filtered records and take at most request.return_count elements
+        matching_texts = [record[request.chunk_text_field] for record in text_filtered_records][:request.return_count]
+
+        # Extract unique_ids of chunks
+        unique_ids = [record["_id"] for record in text_filtered_records][:request.return_count]
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "matching_texts": matching_texts,
-                "message": "Vector similarity calculated successfully",
-                "status_code": 200,
-        })
+        if request.version:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "matching_texts": matching_texts,
+                    "relevancy_scores": similarity_scores[:request.return_count].tolist(),
+                    "unique_ids": unique_ids,
+                    "message": "Vector similarity calculated successfully",
+                    "status_code": 200,
+            })
+        else:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "matching_texts": matching_texts,
+                    "message": "Vector similarity calculated successfully",
+                    "status_code": 200,
+            })
 
     except Exception as e:
         logger.error("Error calculating vector similarity")
@@ -257,3 +298,60 @@ async def vector_similarity_endpoint(request: VectorSimilarity):
                 "status_code": 500,
                 "error": str(e)
         })
+
+
+# Video Dispatch route:
+@router.post("/dispatch_video_processing")
+async def dispatch_video_processing(request: VideoProcessingRequest, background_tasks: BackgroundTasks):
+    ''' Endpoint to dispatch a video processing request to a video processor Lambda function.
+
+    Args:
+        request (VideoProcessingRequest): The request object containing:
+            - video_url (str): The URL of the video to process.
+            - video_id (str): The ID of the video.
+            - bubble_webhook_url (str): The URL of the Bubble Data API.
+            - datatype (str): The name of the Bubble data type.
+            - processor_lambda_arn (str): The ARN of the video processor Lambda function.
+            - count (int): The number of frames to extract from the video.
+
+    Returns:
+        JSONResponse: Response object containing a success message or an error message.
+    '''
+    try:
+        # Initialize a boto3 client for Lambda
+        lambda_client = boto3.client('lambda')
+
+        # Print out the event
+        logger.info(f"Request: {request.json()}")
+
+        # Payload to pass to the video processor function
+        payload = {
+            'video_url': request.video_url,
+            'video_id': request.video_id,
+            'bubble_webhook_url': request.bubble_webhook_url,
+            'datatype': request.datatype,
+            'count': request.count
+        }
+
+        # Asynchronously invoke the Lambda function
+        response = lambda_client.invoke(
+            FunctionName=request.processor_lambda_arn,
+            InvocationType='Event',  # Asynchronous invocation
+            Payload=json.dumps(payload)
+        )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Invoke request sent",
+                "status_code": 200
+            }
+        )
+
+    except KeyError as e:
+        logger.error(f"Missing required parameters: {e}")
+        raise HTTPException(status_code=400, detail=f"Missing required parameters: {e}")
+
+    except Exception as e:
+        logger.error(f"Error invoking Lambda function: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))

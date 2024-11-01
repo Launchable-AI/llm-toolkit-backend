@@ -77,16 +77,18 @@ async def prepare_openai_request(chat_completion: ChatCompletion):
             
             # if token starts with security marker, remove it and decrypt
             if chat_completion.security_token and chat_completion.security_token.startswith("azx09ap29t"):
-                encrypted_token = chat_completion.security_token[10:] 
-                token = await decrypt_jwt(encrypted_token)
+                decoded_token = await decrypt_jwt(chat_completion.security_token)
             else:
-                token = chat_completion.security_token
+                decoded_token = chat_completion.security_token
 
             # veryify token
-            decoded_token = await verify_token(
-                token, 
+            valid_token = await verify_token(
+                decoded_token,
                 chat_completion.app_url
                 )
+
+            if valid_token is False:
+                raise HTTPException(status_code=401, detail="Invalid token")
 
             openai_api_key = decoded_token.get("api_key", None)
             openrouter_api_key = decoded_token.get("openrouter_api_key", None)
@@ -281,11 +283,6 @@ async def num_tokens_from_single_message(message, model="gpt-3.5-turbo-0301"):
     '''
     return await num_tokens_from_messages([message], model)
 
-# The lru_cache decorator will cache results of encoding.encode calls to avoid repeated computations.
-@lru_cache(maxsize=None)  # Unbounded cache. Be careful with memory if the dataset is vast.
-def encode_cache(value, encoding):
-    return encoding.encode(value)
-
 async def num_tokens_from_messages(messages, model="gpt-3.5-turbo-0301"):
     ''' Returns the number of tokens used by a list of messages.
     This is used to check if the token limit has been exceeded.
@@ -360,7 +357,7 @@ async def num_tokens_from_messages(messages, model="gpt-3.5-turbo-0301"):
                         # Extract the text from the item
                         value = item.get('text')
                         break  # Break the loop after finding the first text item
-            num_tokens += len(encode_cache(value, encoding))
+            num_tokens += len(encoding.encode(value))
     logger.debug(f"Number of tokens calculated as: {num_tokens}")
     return num_tokens
 
