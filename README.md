@@ -32,4 +32,4 @@ sudo docker compose up --build
 
 ## Learn More
 
-If you'd like an in-depth guide to all of these steps (launching a server, configuring domain names, etc), please consider taking the mini-course "Self-Hosting LLM Toolkit" from Launchable Academy, which you can sign up for here: https://launchable.ai/course_bubble_plugins
+If you'd like an in-depth guide to all of these steps (launching a server, configuring domain names, etc), please consider taking the mini-course "Self-Hosting LLM Toolkit" from Launchable Academy, which you can sign up for here: https://launchable.ai/course_bubble_ai_plugins
